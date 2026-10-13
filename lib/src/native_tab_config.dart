@@ -12,9 +12,12 @@ class NativeTabConfig {
   final String label;
 
   /// The icon used while the tab is not selected.
+  ///
+  /// An SF Symbol name, a bundle image name, or an absolute path to an image
+  /// file on disk (anything starting with `/`).
   final String symbol;
 
-  /// The icon used while the tab is selected.
+  /// The icon used while the tab is selected. Same forms as [symbol].
   final String selectedSymbol;
 
   /// The native badge text, or null to hide the badge.

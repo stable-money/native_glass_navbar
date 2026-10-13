@@ -410,7 +410,27 @@ class LiquidGlassTabBarController: UITabBarController, UITabBarControllerDelegat
 		}
 	}
     
+    /// Resolves a tab icon.
+    ///
+    /// Accepts, in order: an absolute path to an image file on disk, an SF
+    /// Symbol name, or the name of an image in the host app's bundle.
+    ///
+    /// The file-path form exists for apps whose tab icons are not known at
+    /// build time — server-driven navigation, remote theming, A/B tested
+    /// artwork. Those icons cannot be SF Symbols and are not in the bundle, so
+    /// the host downloads them, caches them, and passes the local path here.
+    /// Icons loaded this way keep their own colours (`.alwaysOriginal`) rather
+    /// than being tinted as a template, since they are usually full-colour
+    /// artwork rather than monochrome glyphs.
     private func resolveSymbol(_ name: String) -> UIImage? {
+        if name.hasPrefix("/") {
+            if let image = UIImage(contentsOfFile: name) {
+                return image.withRenderingMode(.alwaysOriginal)
+            }
+            // Fall through: a path that does not resolve is better rendered as
+            // the placeholder glyph than as a blank tab.
+            return nil
+        }
         return UIImage(systemName: name) ?? UIImage(named: name)
     }
 

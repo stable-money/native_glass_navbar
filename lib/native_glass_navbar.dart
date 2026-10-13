@@ -17,10 +17,17 @@ class NativeGlassNavBarItem {
   /// The label text to display for the tab.
   final String label;
 
-  /// The SF Symbol name to use for the tab icon.
+  /// The icon shown while this tab is not selected.
+  ///
+  /// Either an SF Symbol name, the name of an image in the host app's bundle,
+  /// or an **absolute path to an image file on disk** (anything starting with
+  /// `/`). The file form is for icons that are not known at build time — a
+  /// server-driven nav bar, remote theming, A/B tested artwork — which the host
+  /// downloads and caches before passing the path here. Such icons keep their
+  /// own colours instead of being tinted as a template.
   final String symbol;
 
-  /// The SF Symbol to use while this tab is selected.
+  /// The icon shown while this tab is selected. Same forms as [symbol].
   final String? selectedSymbol;
 
   /// Text shown in the tab's native badge. Null hides the badge.
