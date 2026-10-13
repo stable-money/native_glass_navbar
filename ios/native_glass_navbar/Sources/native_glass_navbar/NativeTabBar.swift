@@ -165,11 +165,24 @@ class LiquidGlassTabBarController: UITabBarController, UITabBarControllerDelegat
 		appearance.configureWithDefaultBackground()
 		appearance.backgroundColor = .clear
 		appearance.shadowColor = .clear
-		appearance.backgroundEffect = UIBlurEffect(style: config.isDark ? .dark : .light)
+
+		// On iOS 26 the *default* background already is Liquid Glass. Assigning
+		// a UIBlurEffect replaces it with the pre-26 frosted blur, which over
+		// light content reads as flat and opaque — exactly what this package
+		// exists to avoid. Only supply an explicit blur on older systems, where
+		// there is no glass to preserve.
+		if #unavailable(iOS 26.0) {
+			appearance.backgroundEffect = UIBlurEffect(
+				style: config.isDark ? .dark : .light
+			)
+		}
 
 		let itemAppearance = UITabBarItemAppearance()
-		itemAppearance.normal.iconColor = .systemGray
-		itemAppearance.selected.iconColor = config.tintColor
+		// Deliberately no `iconColor` here. Setting it tints every icon as a
+		// template, which flattens full-colour artwork to a silhouette. SF
+		// Symbols still follow `tabBar.tintColor` when selected and the system
+		// grey otherwise, while images loaded `.alwaysOriginal` keep their own
+		// colours — which is what a host passing custom artwork wants.
 
 		appearance.stackedLayoutAppearance = itemAppearance
 		appearance.inlineLayoutAppearance = itemAppearance
