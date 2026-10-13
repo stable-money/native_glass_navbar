@@ -424,14 +424,42 @@ class LiquidGlassTabBarController: UITabBarController, UITabBarControllerDelegat
     /// artwork rather than monochrome glyphs.
     private func resolveSymbol(_ name: String) -> UIImage? {
         if name.hasPrefix("/") {
-            if let image = UIImage(contentsOfFile: name) {
-                return image.withRenderingMode(.alwaysOriginal)
+            guard let raw = UIImage(contentsOfFile: name) else {
+                // A path that does not resolve is better rendered as the
+                // placeholder glyph than as a blank tab.
+                return nil
             }
-            // Fall through: a path that does not resolve is better rendered as
-            // the placeholder glyph than as a blank tab.
-            return nil
+            return Self.fittedToTabBarIcon(raw).withRenderingMode(.alwaysOriginal)
         }
         return UIImage(systemName: name) ?? UIImage(named: name)
+    }
+
+    /// Point size of a tab bar icon. Matches what SF Symbols resolve to in a
+    /// `UITabBar`, so symbol and file-backed icons sit at the same size.
+    private static let tabIconSide: CGFloat = 28
+
+    /// Redraws `image` to fit the tab bar's icon box, preserving aspect ratio.
+    ///
+    /// `UIImage(contentsOfFile:)` has no scale parameter and always loads at
+    /// scale 1.0, so a 96px asset is treated as 96 *points* and renders about
+    /// three times too large on a 3x screen. Bundle images and SF Symbols never
+    /// hit this because the loader infers their scale; a bare file cannot.
+    /// `UIGraphicsImageRenderer` draws at the current display scale, so the
+    /// result is correct on 2x and 3x alike.
+    private static func fittedToTabBarIcon(_ image: UIImage) -> UIImage {
+        let side = tabIconSide
+        let size = image.size
+        guard size.width > 0, size.height > 0 else { return image }
+
+        let aspect = size.width / size.height
+        let target = aspect >= 1
+            ? CGSize(width: side, height: side / aspect)
+            : CGSize(width: side * aspect, height: side)
+
+        let renderer = UIGraphicsImageRenderer(size: target)
+        return renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: target))
+        }
     }
 
 	// MARK: - Delegate
