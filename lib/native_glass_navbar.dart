@@ -2,6 +2,7 @@
 library native_glass_navbar;
 
 export 'liquid_glass_helper.dart';
+export 'native_glass_surface.dart';
 
 import 'dart:developer' as developer;
 

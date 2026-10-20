@@ -9,6 +9,9 @@ public class NativeLiquidTabBarPlugin: NSObject, FlutterPlugin {
 
     let factory = NativeTabBarFactory(messenger: registrar.messenger())
     registrar.register(factory, withId: "NativeTabBar")
+
+    // Liquid Glass panels for Flutter content docked above the tab bar.
+    registrar.register(NativeGlassSurfaceFactory(), withId: "NativeGlassSurface")
   }
 
   public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
