@@ -28,19 +28,38 @@ class NativeGlassSurfaceFactory: NSObject, FlutterPlatformViewFactory {
 	}
 }
 
+/// The glass panel, rounded the way Flutter rounds the same box.
+///
+/// The requested radius is capped at half the short side on every layout —
+/// Flutter's `RRect` does the same — since the card is content-sized and the
+/// cap is only known once it is. At that cap the corners are circular: a
+/// continuous corner needs room along each edge beyond its radius, and a
+/// capsule leaves none, so Core Animation draws the ends as a pointed lens
+/// that no longer lines up with a Flutter shadow or border around it.
+private final class GlassPanelView: UIVisualEffectView {
+	var requestedCornerRadius: CGFloat = 0
+
+	override func layoutSubviews() {
+		super.layoutSubviews()
+		let capsuleRadius = min(bounds.width, bounds.height) / 2
+		let radius = min(requestedCornerRadius, capsuleRadius)
+		layer.cornerRadius = radius
+		layer.cornerCurve = radius >= capsuleRadius - 0.5 ? .circular : .continuous
+	}
+}
+
 class NativeGlassSurfacePlatformView: NSObject, FlutterPlatformView {
-	private let effectView: UIVisualEffectView
+	private let effectView: GlassPanelView
 
 	init(frame: CGRect, args: Any?) {
 		let params = args as? [String: Any] ?? [:]
 		let cornerRadius = CGFloat((params["cornerRadius"] as? NSNumber)?.doubleValue ?? 0)
 		let tint = (params["tintColor"] as? NSNumber).map { Self.color(argb: $0.uint32Value) }
 
-		effectView = UIVisualEffectView(effect: Self.makeEffect(tint: tint))
+		effectView = GlassPanelView(effect: Self.makeEffect(tint: tint))
 		effectView.frame = frame
 		effectView.clipsToBounds = true
-		effectView.layer.cornerRadius = cornerRadius
-		effectView.layer.cornerCurve = .continuous
+		effectView.requestedCornerRadius = cornerRadius
 		// Touches belong to the Flutter content above; the Dart side also wraps
 		// the view in IgnorePointer, so this is belt and braces.
 		effectView.isUserInteractionEnabled = false
