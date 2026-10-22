@@ -56,6 +56,63 @@ struct NativeTabConfig: Equatable {
 	}
 }
 
+/// Font, size, colours and spacing of the tab labels.
+///
+/// When a host supplies one, the bar draws each tab's icon and label together
+/// into a single image instead of using UIKit's own title. The iOS 26 glass
+/// bar keeps a custom font but ignores title colours and position
+/// adjustments — it draws every label in its own vibrant black — so this is
+/// the only way the colours and the icon-to-label gap actually take effect.
+struct TabLabelStyle: Equatable {
+	var fontName: String?
+	var selectedFontName: String?
+	var fontSize: CGFloat?
+	var colorARGB: Int?
+	var selectedColorARGB: Int?
+	var iconLabelGap: CGFloat
+	/// Side of the square box each icon is fitted into.
+	var iconSize: CGFloat
+	/// Tracking, in points, like Flutter's `letterSpacing`.
+	var letterSpacing: CGFloat?
+
+	init?(from dict: [String: Any]?) {
+		guard let dict = dict else { return nil }
+		func number(_ key: String) -> CGFloat? {
+			(dict[key] as? NSNumber).map { CGFloat($0.doubleValue) }
+		}
+		fontName = dict["fontName"] as? String
+		selectedFontName = dict["selectedFontName"] as? String
+		fontSize = number("fontSize")
+		colorARGB = (dict["color"] as? NSNumber)?.intValue
+		selectedColorARGB = (dict["selectedColor"] as? NSNumber)?.intValue
+		iconLabelGap = number("iconLabelGap") ?? 4
+		iconSize = number("iconSize") ?? 28
+		letterSpacing = number("letterSpacing")
+	}
+
+	func color(selected: Bool, tint: UIColor) -> UIColor {
+		guard let argb = selected ? selectedColorARGB : colorARGB else {
+			return selected ? tint : .secondaryLabel
+		}
+		return TabBarConfig.uiColorFromARGB(argb)
+	}
+
+	/// Text attributes for one label state. An unregistered font name falls
+	/// back to the system font at the requested size rather than to no label.
+	func attributes(selected: Bool, tint: UIColor) -> [NSAttributedString.Key: Any] {
+		let size = fontSize ?? 10
+		let name = selected ? (selectedFontName ?? fontName) : fontName
+		let font = name.flatMap { UIFont(name: $0, size: size) } ?? .systemFont(ofSize: size)
+		var attributes: [NSAttributedString.Key: Any] = [
+			.font: font, .foregroundColor: color(selected: selected, tint: tint),
+		]
+		if let letterSpacing = letterSpacing {
+			attributes[.kern] = letterSpacing
+		}
+		return attributes
+	}
+}
+
 struct TabBarConfig: Equatable {
 	var tabs: [NativeTabConfig] = []
 	var actionButtonSymbol: String = ""  // Default to empty
@@ -63,6 +120,7 @@ struct TabBarConfig: Equatable {
 	var tintColorARGB: Int = 0xFF007AFF
 	var selectedIndex: Int = 0
 	var isDark: Bool = false
+	var labelStyle: TabLabelStyle?
 
 	var standardItemCount: Int {
 		return tabs.count
@@ -92,11 +150,15 @@ struct TabBarConfig: Equatable {
 		if let isDark = dict["isDark"] as? Bool {
 			self.isDark = isDark
 		}
+		self.labelStyle = TabLabelStyle(from: dict["labelStyle"] as? [String: Any])
 	}
 
 	func structuralChange(from other: TabBarConfig) -> Bool {
 		return standardItemCount != other.standardItemCount
 			|| hasActionButton != other.hasActionButton
+			// Every tab image is drawn from the style, so a new one redraws all.
+			|| labelStyle != other.labelStyle
+			|| tintColorARGB != other.tintColorARGB
 	}
 
 	static func == (lhs: TabBarConfig, rhs: TabBarConfig) -> Bool {
@@ -105,9 +167,10 @@ struct TabBarConfig: Equatable {
 			&& lhs.tintColorARGB == rhs.tintColorARGB
 			&& lhs.selectedIndex == rhs.selectedIndex
 			&& lhs.isDark == rhs.isDark
+			&& lhs.labelStyle == rhs.labelStyle
 	}
 
-	private static func uiColorFromARGB(_ argb: Int) -> UIColor {
+	static func uiColorFromARGB(_ argb: Int) -> UIColor {
 		let a = CGFloat((argb >> 24) & 0xFF) / 255.0
 		let r = CGFloat((argb >> 16) & 0xFF) / 255.0
 		let g = CGFloat((argb >> 8) & 0xFF) / 255.0
@@ -123,6 +186,7 @@ class LiquidGlassTabBarController: UITabBarController, UITabBarControllerDelegat
 	private var config: TabBarConfig
 	private var currentAppearanceIsDark: Bool
 	private var currentTintColorARGB: Int
+	private var currentLabelStyle: TabLabelStyle?
 
 	init(viewId: Int64, messenger: FlutterBinaryMessenger, args: Any?) {
 		self.channel = FlutterMethodChannel(
@@ -132,6 +196,7 @@ class LiquidGlassTabBarController: UITabBarController, UITabBarControllerDelegat
 		self.config = TabBarConfig(from: args as? [String: Any])
 		self.currentAppearanceIsDark = config.isDark
 		self.currentTintColorARGB = config.tintColorARGB
+		self.currentLabelStyle = config.labelStyle
 		super.init(nibName: nil, bundle: nil)
 	}
 
@@ -158,6 +223,93 @@ class LiquidGlassTabBarController: UITabBarController, UITabBarControllerDelegat
 	override func viewDidLayoutSubviews() {
 		super.viewDidLayoutSubviews()
 		self.view.backgroundColor = .clear
+		// This runs before the tab bar lays out its own subviews, so the
+		// capsule may not exist or be sized yet. Look again once the pass has
+		// finished, and a few times after while UIKit settles the glass in.
+		reportCapsuleFrame()
+		for delay in [0.0, 0.1, 0.3, 0.8] {
+			DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+				self?.reportCapsuleFrame()
+			}
+		}
+	}
+
+	override func viewDidAppear(_ animated: Bool) {
+		super.viewDidAppear(animated)
+		reportCapsuleFrame()
+	}
+
+	/// The last capsule frame sent to Flutter, so a layout pass that moves
+	/// nothing sends nothing. Starts as a sentinel so the first result, even
+	/// "none found", always reaches Flutter.
+	private var lastCapsuleFrame: CGRect? = .infinite
+
+	/// Tells Flutter where the glass capsule is, in this view's coordinates
+	/// (the same as the Flutter platform view's), so the host can draw around
+	/// it — a shadow, say. UIKit has no public API for the capsule, so it is
+	/// found by shape; see `findCapsuleFrame`.
+	///
+	/// When nothing matches, the view tree it searched goes along too, so the
+	/// host can log why rather than silently drawing nothing.
+	private func reportCapsuleFrame() {
+		let frame = findCapsuleFrame()
+		guard frame != lastCapsuleFrame else { return }
+		lastCapsuleFrame = frame
+		var arguments: [String: Any] = [:]
+		if let frame = frame {
+			arguments = ["x": frame.minX, "y": frame.minY, "width": frame.width, "height": frame.height]
+		} else {
+			arguments["hierarchy"] = describeHierarchy()
+		}
+		channel.invokeMethod("capsuleFrame", arguments: arguments)
+	}
+
+	/// The largest capsule-proportioned view in the bar — the tab bar itself
+	/// included — that is narrower than the whole platform view. On iOS 26
+	/// that is the floating glass: either `tabBar` itself, inset by UIKit, or
+	/// the platter inside it. The selected tab's highlight is capsule-shaped
+	/// too, but always smaller. Without a floating bar nothing matches.
+	private func findCapsuleFrame() -> CGRect? {
+		let fullWidth = view.bounds.width
+		guard fullWidth > 0 else { return nil }
+		var best: CGRect?
+
+		func consider(_ candidate: UIView) {
+			guard !candidate.isHidden, candidate.alpha > 0.01 else { return }
+			let frame = candidate.convert(candidate.bounds, to: view)
+			let isCapsule =
+				frame.width < fullWidth - 1
+				&& frame.height >= 40
+				&& frame.height <= 120
+				&& frame.width >= frame.height * 2
+			if isCapsule, frame.width * frame.height > (best.map { $0.width * $0.height } ?? 0) {
+				best = frame
+			}
+			for child in candidate.subviews {
+				consider(child)
+			}
+		}
+		consider(tabBar)
+		return best
+	}
+
+	/// The tab bar's view tree, three levels deep, with each frame in this
+	/// view's coordinates — for diagnosing a capsule that was not found.
+	private func describeHierarchy() -> String {
+		var lines = ["root \(view.bounds)"]
+		func walk(_ v: UIView, _ depth: Int) {
+			let frame = v.convert(v.bounds, to: view)
+			let flags = (v.isHidden ? " hidden" : "") + (v.alpha < 0.01 ? " transparent" : "")
+			lines.append(
+				String(repeating: "  ", count: depth)
+					+ "\(type(of: v)) \(frame.integral) r=\(v.layer.cornerRadius)\(flags)"
+			)
+			if depth < 3 {
+				v.subviews.forEach { walk($0, depth + 1) }
+			}
+		}
+		walk(tabBar, 0)
+		return lines.joined(separator: "\n")
 	}
 
 	private func configureAppearance() {
@@ -183,6 +335,9 @@ class LiquidGlassTabBarController: UITabBarController, UITabBarControllerDelegat
 		// Symbols still follow `tabBar.tintColor` when selected and the system
 		// grey otherwise, while images loaded `.alwaysOriginal` keep their own
 		// colours — which is what a host passing custom artwork wants.
+		//
+		// With a host label style the labels are drawn into the tab images
+		// instead (see `tabImage`), so there is nothing to set here.
 
 		appearance.stackedLayoutAppearance = itemAppearance
 		appearance.inlineLayoutAppearance = itemAppearance
@@ -234,20 +389,19 @@ class LiquidGlassTabBarController: UITabBarController, UITabBarControllerDelegat
 
 		for i in 0..<config.standardItemCount {
 			guard i < vcs.count, let item = vcs[i].tabBarItem else { continue }
-			let newLabel = label(at: i, in: config)
-			let newSymbol = symbol(at: i, in: config)
-			let newSelectedSymbol = config.tabs[i].selectedSymbol
+			let labelChanged = label(at: i, in: config) != label(at: i, in: oldConfig)
 
-			if newLabel != label(at: i, in: oldConfig) {
-				item.title = newLabel
+			if labelChanged {
+				item.title = tabTitle(at: i)
+				item.accessibilityLabel = label(at: i, in: config)
 			}
 
-			if newSymbol != symbol(at: i, in: oldConfig) {
-				item.image = resolveSymbol(newSymbol)
+			if labelChanged || symbol(at: i, in: config) != symbol(at: i, in: oldConfig) {
+				item.image = tabImage(at: i, selected: false)
 			}
 
-			if newSelectedSymbol != oldConfig.tabs[i].selectedSymbol {
-				item.selectedImage = resolveSymbol(newSelectedSymbol)
+			if labelChanged || config.tabs[i].selectedSymbol != oldConfig.tabs[i].selectedSymbol {
+				item.selectedImage = tabImage(at: i, selected: true)
 			}
 
 			if config.tabs[i].badgeValue != oldConfig.tabs[i].badgeValue {
@@ -267,19 +421,18 @@ class LiquidGlassTabBarController: UITabBarController, UITabBarControllerDelegat
 		performBatchUpdates {
 			for i in 0..<config.standardItemCount {
 				guard let tab = tab(forIdentifier: tabIdentifier(at: i)) else { continue }
-				let newLabel = label(at: i, in: config)
-				let newSymbol = symbol(at: i, in: config)
+				let labelChanged = label(at: i, in: config) != label(at: i, in: oldConfig)
 
-				if newLabel != label(at: i, in: oldConfig) {
-					tab.title = newLabel
+				if labelChanged {
+					tab.title = tabTitle(at: i)
 				}
 
-				if newSymbol != symbol(at: i, in: oldConfig) {
-					tab.image = resolveSymbol(newSymbol)
+				if labelChanged || symbol(at: i, in: config) != symbol(at: i, in: oldConfig) {
+					tab.image = tabImage(at: i, selected: false)
 				}
 
-				if config.tabs[i].selectedSymbol != oldConfig.tabs[i].selectedSymbol {
-					tab.selectedImage = resolveSymbol(config.tabs[i].selectedSymbol)
+				if labelChanged || config.tabs[i].selectedSymbol != oldConfig.tabs[i].selectedSymbol {
+					tab.selectedImage = tabImage(at: i, selected: true)
 				}
 
 				if config.tabs[i].badgeValue != oldConfig.tabs[i].badgeValue {
@@ -307,6 +460,78 @@ class LiquidGlassTabBarController: UITabBarController, UITabBarControllerDelegat
 		return "native_glass_navbar.tab.\(index)"
 	}
 
+	/// UIKit's title for a tab: empty when the label is drawn into the image,
+	/// so it is not shown twice. VoiceOver reads `accessibilityLabel` instead.
+	private func tabTitle(at index: Int) -> String {
+		return config.labelStyle == nil ? label(at: index, in: config) : ""
+	}
+
+	/// A tab's image for one state: the bare icon, or — with a host label
+	/// style — the icon with its label drawn beneath it.
+	private func tabImage(at index: Int, selected: Bool) -> UIImage? {
+		let tab = config.tabs[index]
+		let name = selected ? tab.selectedSymbol : tab.symbol
+		guard let style = config.labelStyle else { return resolveSymbol(name) }
+		let icon = resolveSymbol(name, side: style.iconSize)
+		return Self.iconWithLabel(
+			icon: icon,
+			label: tab.label,
+			style: style,
+			selected: selected,
+			tint: config.tintColor
+		)
+	}
+
+	/// Draws `icon` in the standard icon box with `label` centred beneath it,
+	/// `style.iconLabelGap` apart, as one `.alwaysOriginal` image so UIKit
+	/// shows the label's font and colour exactly as given. SF Symbols, being
+	/// templates, are coloured like the label beside them.
+	private static func iconWithLabel(
+		icon: UIImage?,
+		label: String,
+		style: TabLabelStyle,
+		selected: Bool,
+		tint: UIColor
+	) -> UIImage {
+		let attributes = style.attributes(selected: selected, tint: tint)
+		let text = label as NSString
+		let textSize = text.size(withAttributes: attributes)
+		let side = style.iconSize
+		let size = CGSize(
+			width: ceil(max(side, textSize.width)),
+			height: ceil(side + style.iconLabelGap + textSize.height)
+		)
+
+		let renderer = UIGraphicsImageRenderer(size: size)
+		let image = renderer.image { _ in
+			if var icon = icon {
+				if icon.renderingMode != .alwaysOriginal {
+					icon = icon.withTintColor(
+						style.color(selected: selected, tint: tint),
+						renderingMode: .alwaysOriginal
+					)
+				}
+				let iconSize = icon.size
+				icon.draw(
+					in: CGRect(
+						x: (size.width - iconSize.width) / 2,
+						y: (side - iconSize.height) / 2,
+						width: iconSize.width,
+						height: iconSize.height
+					)
+				)
+			}
+			text.draw(
+				at: CGPoint(
+					x: (size.width - textSize.width) / 2,
+					y: side + style.iconLabelGap
+				),
+				withAttributes: attributes
+			)
+		}
+		return image.withRenderingMode(.alwaysOriginal)
+	}
+
 	private func performFullRebuild() {
 		if #available(iOS 27.0, *) {
 			performModernFullRebuild()
@@ -322,10 +547,11 @@ class LiquidGlassTabBarController: UITabBarController, UITabBarControllerDelegat
 			dummyVC.view.backgroundColor = .clear
 
 			let item = UITabBarItem(
-				title: label(at: i, in: config),
-				image: resolveSymbol(symbol(at: i, in: config)),
-				selectedImage: resolveSymbol(config.tabs[i].selectedSymbol)
+				title: tabTitle(at: i),
+				image: tabImage(at: i, selected: false),
+				selectedImage: tabImage(at: i, selected: true)
 			)
+			item.accessibilityLabel = label(at: i, in: config)
 			item.tag = i
 			item.badgeValue = config.tabs[i].badgeValue
 			dummyVC.tabBarItem = item
@@ -354,15 +580,15 @@ class LiquidGlassTabBarController: UITabBarController, UITabBarControllerDelegat
 
 		for i in 0..<config.standardItemCount {
 			let tab = UITab(
-				title: label(at: i, in: config),
-				image: resolveSymbol(symbol(at: i, in: config)),
+				title: tabTitle(at: i),
+				image: tabImage(at: i, selected: false),
 				identifier: tabIdentifier(at: i)
 			) { _ in
 				let viewController = UIViewController()
 				viewController.view.backgroundColor = .clear
 				return viewController
 			}
-			tab.selectedImage = resolveSymbol(config.tabs[i].selectedSymbol)
+			tab.selectedImage = tabImage(at: i, selected: true)
 			tab.badgeValue = config.tabs[i].badgeValue
 			tab.userInfo = i
 			newTabs.append(tab)
@@ -391,11 +617,13 @@ class LiquidGlassTabBarController: UITabBarController, UITabBarControllerDelegat
 		let needsAppearanceUpdate =
 			currentTintColorARGB != config.tintColorARGB
 			|| currentAppearanceIsDark != config.isDark
+			|| currentLabelStyle != config.labelStyle
 
 		if needsAppearanceUpdate {
 			tabBar.tintColor = config.tintColor
 			currentTintColorARGB = config.tintColorARGB
 			currentAppearanceIsDark = config.isDark
+			currentLabelStyle = config.labelStyle
 			overrideUserInterfaceStyle = config.isDark ? .dark : .light
 			configureAppearance()
 		}
@@ -435,14 +663,14 @@ class LiquidGlassTabBarController: UITabBarController, UITabBarControllerDelegat
     /// Icons loaded this way keep their own colours (`.alwaysOriginal`) rather
     /// than being tinted as a template, since they are usually full-colour
     /// artwork rather than monochrome glyphs.
-    private func resolveSymbol(_ name: String) -> UIImage? {
+    private func resolveSymbol(_ name: String, side: CGFloat = tabIconSide) -> UIImage? {
         if name.hasPrefix("/") {
             guard let raw = UIImage(contentsOfFile: name) else {
                 // A path that does not resolve is better rendered as the
                 // placeholder glyph than as a blank tab.
                 return nil
             }
-            return Self.fittedToTabBarIcon(raw).withRenderingMode(.alwaysOriginal)
+            return Self.fittedToTabBarIcon(raw, side: side).withRenderingMode(.alwaysOriginal)
         }
         return UIImage(systemName: name) ?? UIImage(named: name)
     }
@@ -459,8 +687,7 @@ class LiquidGlassTabBarController: UITabBarController, UITabBarControllerDelegat
     /// hit this because the loader infers their scale; a bare file cannot.
     /// `UIGraphicsImageRenderer` draws at the current display scale, so the
     /// result is correct on 2x and 3x alike.
-    private static func fittedToTabBarIcon(_ image: UIImage) -> UIImage {
-        let side = tabIconSide
+    private static func fittedToTabBarIcon(_ image: UIImage, side: CGFloat) -> UIImage {
         let size = image.size
         guard size.width > 0, size.height > 0 else { return image }
 

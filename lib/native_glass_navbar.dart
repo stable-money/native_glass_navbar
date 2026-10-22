@@ -3,6 +3,7 @@ library native_glass_navbar;
 
 export 'liquid_glass_helper.dart';
 export 'native_glass_surface.dart';
+export 'src/native_tab_config.dart' show NativeTabLabelStyle;
 
 import 'dart:developer' as developer;
 
@@ -83,6 +84,14 @@ class NativeGlassNavBar extends StatefulWidget {
   /// If null, defaults to the primary color of the current [Theme].
   final Color? tintColor;
 
+  /// Font, size and colours of the tab labels. Null keeps the system's.
+  final NativeTabLabelStyle? labelStyle;
+
+  /// Called with the glass capsule's frame, in this widget's coordinates,
+  /// whenever UIKit lays it out somewhere new — and with null when the bar
+  /// has no floating capsule. Lets the host draw around it, e.g. a shadow.
+  final ValueChanged<Rect?>? onCapsuleFrame;
+
   /// A widget to display when the native glass effect is not supported.
   final Widget? fallback;
 
@@ -94,6 +103,8 @@ class NativeGlassNavBar extends StatefulWidget {
     required this.currentIndex,
     required this.onTap,
     this.tintColor,
+    this.labelStyle,
+    this.onCapsuleFrame,
     this.fallback,
   }) : assert(
          tabs.length <= (actionButton == null ? 5 : 4),
@@ -152,6 +163,7 @@ class _NativeGlassNavBarState extends State<NativeGlassNavBar> {
       tintColor: widget.tintColor != null
           ? widget.tintColor!.toARGB32()
           : Theme.of(context).colorScheme.primary.toARGB32(),
+      labelStyle: widget.labelStyle,
     );
   }
 
@@ -233,6 +245,27 @@ class _NativeGlassNavBarState extends State<NativeGlassNavBar> {
                 if (call.method == 'actionButtonPressed') {
                   widget.actionButton?.onTap();
                 }
+
+                if (call.method == 'capsuleFrame') {
+                  final frame = call.arguments as Map? ?? const {};
+                  final found = frame['width'] != null;
+                  if (!found && kDebugMode) {
+                    debugPrint(
+                      'NativeGlassNavBar: no capsule found in\n'
+                      '${frame['hierarchy']}',
+                    );
+                  }
+                  widget.onCapsuleFrame?.call(
+                    found
+                        ? Rect.fromLTWH(
+                            (frame['x'] as num).toDouble(),
+                            (frame['y'] as num).toDouble(),
+                            (frame['width'] as num).toDouble(),
+                            (frame['height'] as num).toDouble(),
+                          )
+                        : null,
+                  );
+                }
               });
             },
           ),
@@ -249,6 +282,7 @@ class _NativeGlassNavBarParams {
     required this.selectedIndex,
     required this.isDark,
     required this.tintColor,
+    required this.labelStyle,
   });
 
   final List<NativeTabConfig> tabs;
@@ -256,6 +290,7 @@ class _NativeGlassNavBarParams {
   final int selectedIndex;
   final bool isDark;
   final int tintColor;
+  final NativeTabLabelStyle? labelStyle;
 
   Map<String, dynamic> toMap() {
     return createNativeTabBarParams(
@@ -264,6 +299,7 @@ class _NativeGlassNavBarParams {
       selectedIndex: selectedIndex,
       isDark: isDark,
       tintColor: tintColor,
+      labelStyle: labelStyle,
     );
   }
 
@@ -274,6 +310,7 @@ class _NativeGlassNavBarParams {
       selectedIndex: selectedIndex ?? this.selectedIndex,
       isDark: isDark,
       tintColor: tintColor,
+      labelStyle: labelStyle,
     );
   }
 
@@ -285,7 +322,8 @@ class _NativeGlassNavBarParams {
             actionButtonSymbol == other.actionButtonSymbol &&
             selectedIndex == other.selectedIndex &&
             isDark == other.isDark &&
-            tintColor == other.tintColor;
+            tintColor == other.tintColor &&
+            labelStyle == other.labelStyle;
   }
 
   @override
@@ -305,6 +343,7 @@ class _NativeGlassNavBarParams {
       selectedIndex,
       isDark,
       tintColor,
+      labelStyle,
     );
   }
 }

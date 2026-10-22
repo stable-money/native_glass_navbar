@@ -53,6 +53,36 @@ void main() {
     });
     expect(params, isNot(contains('labels')));
     expect(params, isNot(contains('symbols')));
+    expect(params, isNot(contains('labelStyle')));
+    final encoded = const StandardMessageCodec().encodeMessage(params);
+    expect(const StandardMessageCodec().decodeMessage(encoded), params);
+  });
+
+  test('sends the label style, defaulting the selected font', () {
+    final params = createNativeTabBarParams(
+      tabs: const [NativeTabConfig(label: 'Home', symbol: 'house')],
+      actionButtonSymbol: null,
+      selectedIndex: 0,
+      isDark: false,
+      tintColor: 0xFF007AFF,
+      labelStyle: const NativeTabLabelStyle(
+        fontName: 'CircularStd-Book',
+        fontSize: 11,
+        color: 0x80000000,
+        selectedColor: 0xCC000000,
+      ),
+    );
+
+    expect(params['labelStyle'], {
+      'fontName': 'CircularStd-Book',
+      'selectedFontName': 'CircularStd-Book',
+      'fontSize': 11.0,
+      'color': 0x80000000,
+      'selectedColor': 0xCC000000,
+      'iconLabelGap': null,
+      'iconSize': null,
+      'letterSpacing': null,
+    });
     final encoded = const StandardMessageCodec().encodeMessage(params);
     expect(const StandardMessageCodec().decodeMessage(encoded), params);
   });
